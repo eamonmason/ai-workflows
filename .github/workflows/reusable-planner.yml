@@ -13,6 +13,10 @@ on:
         required: false
         type: string
         default: ""
+      latest_comment:
+        required: false
+        type: string
+        default: ""
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -32,11 +36,21 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ISSUE_TITLE: ${{ inputs.issue_title }}
           ISSUE_BODY: ${{ inputs.issue_body }}
+          LATEST_COMMENT: ${{ inputs.latest_comment }}
           CLAUDE_CODE_NO_FLICKER: 1
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "Error: ANTHROPIC_API_KEY is empty."
             exit 1
           fi
-          PLAN=$(npx @anthropic-ai/claude-code --bare -p "Analyze this issue: '$ISSUE_TITLE'. Content: '$ISSUE_BODY'. Propose a concise implementation plan. Mention that the user should reply with '@agent execute' to start." --allowedTools "Read")
+          
+          PROMPT="Analyze this issue: '$ISSUE_TITLE'. Original Content: '$ISSUE_BODY'."
+          if [ -n "$LATEST_COMMENT" ]; then
+            PROMPT="$PROMPT The user has provided additional feedback/feedback: '$LATEST_COMMENT'. Please refine or update the implementation plan based on this feedback."
+          else
+            PROMPT="$PROMPT Propose a concise implementation plan."
+          fi
+          PROMPT="$PROMPT Mention that the user should reply with '@agent execute' to start, or provide further feedback to iterate on this plan."
+          
+          PLAN=$(npx @anthropic-ai/claude-code --bare -p "$PROMPT" --allowedTools "Read")
           gh issue comment ${{ inputs.issue_number }} --body "🤖 **Agent Planner:** $PLAN"
