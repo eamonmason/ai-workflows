@@ -1,0 +1,45 @@
+name: Reusable Agent Reviewer
+
+on:
+  workflow_call:
+    inputs:
+      pull_request_number:
+        required: true
+        type: string
+      pull_request_title:
+        required: true
+        type: string
+      comment_body:
+        required: true
+        type: string
+      head_ref:
+        required: true
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head_ref }}
+      - name: Agent Re-evaluate
+        run: |
+          echo "Agent addressing review comments..."
+          npx @anthropic-ai/claude-code --bare -p "Address the feedback in this PR review comment: '${{ inputs.comment_body }}'. The comment is on a PR that implements '${{ inputs.pull_request_title }}'. Use available tools to fix the code and tests." --allowedTools "Bash,Edit,Read"
+          
+          git add .
+          git commit -m "fix: Address agent review feedback"
+          git push origin ${{ inputs.head_ref }}
+          gh pr comment ${{ inputs.pull_request_number }} --body "🤖 **Agent Reviewer:** I have pushed a new commit to address your feedback."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_NO_FLICKER: 1

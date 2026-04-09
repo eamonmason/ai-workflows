@@ -1,0 +1,61 @@
+name: Reusable Agent Executor
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: string
+      issue_title:
+        required: true
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      issues: write
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Agent Execution
+        run: |
+          echo "Executing plan for issue #${{ inputs.issue_number }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          BRANCH_NAME="feature/issue-${{ inputs.issue_number }}"
+          git checkout -b "$BRANCH_NAME" || git checkout "$BRANCH_NAME"
+          
+          npx @anthropic-ai/claude-code --bare -p "Implement the approved plan for issue #${{ inputs.issue_number }}: '${{ inputs.issue_title }}'. Use available tools to write code and tests. Verify your changes." --allowedTools "Bash,Edit,Read"
+          
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "feat: Implement issue #${{ inputs.issue_number }}"
+            git push origin "$BRANCH_NAME"
+          else
+            echo "No changes to commit (agent may have already committed them or no changes were needed)."
+            git push origin "$BRANCH_NAME" || echo "Branch already up to date on remote."
+          fi
+          
+          PR_URL=$(gh pr create --title "feat: Implement issue #${{ inputs.issue_number }}" --body "This PR was generated automatically by the Agent Executor based on the approved plan." --base main --head "$BRANCH_NAME" 2>/dev/null || gh pr view "$BRANCH_NAME" --json url --jq '.url')
+          
+          if [ -n "$PR_URL" ]; then
+            gh issue comment ${{ inputs.issue_number }} --body "🚀 **Agent Execution Complete:** I have implemented the plan and created a Pull Request: $PR_URL"
+          else
+            gh issue comment ${{ inputs.issue_number }} --body "❌ **Agent Error:** Implementation completed but I was unable to create or find a Pull Request."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_NO_FLICKER: 1
