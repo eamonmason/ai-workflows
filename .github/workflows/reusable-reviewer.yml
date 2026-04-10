@@ -31,14 +31,15 @@ jobs:
       - name: Resolve Head Ref
         id: resolve-ref
         run: |
-          echo "Context: PR #${{ inputs.pull_request_number }}"
+          echo "Input PR Number: '${{ inputs.pull_request_number }}'"
+          CLEAN_PR_NUMBER=$(echo "${{ inputs.pull_request_number }}" | sed 's/"//g' | xargs)
+          echo "Cleaned PR Number: '$CLEAN_PR_NUMBER'"
+          
           if [ -n "${{ inputs.head_ref }}" ]; then
             echo "ref=${{ inputs.head_ref }}" >> $GITHUB_OUTPUT
             echo "Using provided ref: ${{ inputs.head_ref }}"
           else
-            echo "Fetching head ref for PR #${{ inputs.pull_request_number }}..."
-            # Strip quotes from pull_request_number if they were added by toJSON()
-            CLEAN_PR_NUMBER=$(echo "${{ inputs.pull_request_number }}" | sed 's/"//g')
+            echo "Fetching head ref for PR #$CLEAN_PR_NUMBER..."
             HEAD_REF=$(gh pr view "$CLEAN_PR_NUMBER" --json headRefName -q .headRefName)
             echo "ref=$HEAD_REF" >> $GITHUB_OUTPUT
             echo "Resolved head ref: $HEAD_REF"
