@@ -21,7 +21,17 @@ on:
         required: true
 
 jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print Context
+        run: |
+          echo "Event Name: ${{ github.event_name }}"
+          echo "PR Number: ${{ inputs.pull_request_number }}"
+          echo "Head Ref: ${{ inputs.head_ref }}"
+
   review:
+    needs: debug
     runs-on: ubuntu-latest
     environment: production
     permissions:
