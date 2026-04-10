@@ -31,17 +31,24 @@ jobs:
       - name: Resolve Head Ref
         id: resolve-ref
         run: |
+          echo "Context: PR #${{ inputs.pull_request_number }}"
           if [ -n "${{ inputs.head_ref }}" ]; then
             echo "ref=${{ inputs.head_ref }}" >> $GITHUB_OUTPUT
+            echo "Using provided ref: ${{ inputs.head_ref }}"
           else
             echo "Fetching head ref for PR #${{ inputs.pull_request_number }}..."
-            HEAD_REF=$(gh pr view ${{ inputs.pull_request_number }} --json headRefName -q .headRefName)
+            # Strip quotes from pull_request_number if they were added by toJSON()
+            CLEAN_PR_NUMBER=$(echo "${{ inputs.pull_request_number }}" | sed 's/"//g')
+            HEAD_REF=$(gh pr view "$CLEAN_PR_NUMBER" --json headRefName -q .headRefName)
             echo "ref=$HEAD_REF" >> $GITHUB_OUTPUT
+            echo "Resolved head ref: $HEAD_REF"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/checkout@v4
+      - name: Checkout
+        if: steps.resolve-ref.outputs.ref != ''
+        uses: actions/checkout@v4
         with:
           ref: ${{ steps.resolve-ref.outputs.ref }}
           fetch-depth: 0
