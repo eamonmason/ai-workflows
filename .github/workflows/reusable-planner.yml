@@ -9,14 +9,6 @@ on:
       issue_title:
         required: true
         type: string
-      issue_body:
-        required: false
-        type: string
-        default: ""
-      latest_comment:
-        required: false
-        type: string
-        default: ""
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -35,8 +27,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ISSUE_TITLE: ${{ inputs.issue_title }}
-          ISSUE_BODY: ${{ inputs.issue_body }}
-          LATEST_COMMENT: ${{ inputs.latest_comment }}
           CLAUDE_CODE_NO_FLICKER: 1
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
@@ -44,9 +34,16 @@ jobs:
             exit 1
           fi
           
+          # Fetch full issue data robustly via CLI
+          ISSUE_DATA=$(gh issue view ${{ inputs.issue_number }} --json body,comments)
+          ISSUE_BODY=$(echo "$ISSUE_DATA" | jq -r '.body')
+          
+          # Get the latest human comment (excluding bot comments)
+          LATEST_COMMENT=$(echo "$ISSUE_DATA" | jq -r '.comments | map(select(.author.login != "github-actions")) | last | .body // ""')
+          
           PROMPT="Analyze this issue: '$ISSUE_TITLE'. Original Content: '$ISSUE_BODY'."
-          if [ -n "$LATEST_COMMENT" ]; then
-            PROMPT="$PROMPT The user has provided additional feedback/feedback: '$LATEST_COMMENT'. Please refine or update the implementation plan based on this feedback."
+          if [ -n "$LATEST_COMMENT" ] && [ "$LATEST_COMMENT" != "null" ]; then
+            PROMPT="$PROMPT The user has provided additional feedback: '$LATEST_COMMENT'. Please refine or update the implementation plan based on this feedback."
           else
             PROMPT="$PROMPT Propose a concise implementation plan."
           fi
