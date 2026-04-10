@@ -21,7 +21,6 @@ jobs:
       pull-requests: write
       actions: write
       issues: write
-      workflows: write
     steps:
       - uses: actions/checkout@v4
       - name: Cache Claude Binary

@@ -38,7 +38,6 @@ jobs:
       pull-requests: write
       actions: write
       issues: write
-      workflows: write
     steps:
       - name: Resolve Head Ref
         id: resolve-ref
