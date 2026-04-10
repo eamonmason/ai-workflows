@@ -23,6 +23,7 @@ on:
 jobs:
   debug:
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Print Context
         run: |
@@ -33,6 +34,7 @@ jobs:
   review:
     needs: debug
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: write
       pull-requests: write
