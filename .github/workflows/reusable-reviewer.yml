@@ -50,7 +50,7 @@ jobs:
             echo "Using provided ref: ${{ inputs.head_ref }}"
           else
             echo "Fetching head ref for PR #$CLEAN_PR_NUMBER..."
-            HEAD_REF=$(gh pr view "$CLEAN_PR_NUMBER" --json headRefName -q .headRefName)
+            HEAD_REF=$(gh pr view "$CLEAN_PR_NUMBER" --repo ${{ github.repository }} --json headRefName -q .headRefName)
             echo "ref=$HEAD_REF" >> $GITHUB_OUTPUT
             echo "Resolved head ref: $HEAD_REF"
           fi
