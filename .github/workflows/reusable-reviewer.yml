@@ -13,8 +13,9 @@ on:
         required: true
         type: string
       head_ref:
-        required: true
+        required: false
         type: string
+        default: ''
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -27,18 +28,55 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Resolve Head Ref
+        id: resolve-ref
+        run: |
+          if [ -n "${{ inputs.head_ref }}" ]; then
+            echo "ref=${{ inputs.head_ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "Fetching head ref for PR #${{ inputs.pull_request_number }}..."
+            HEAD_REF=$(gh pr view ${{ inputs.pull_request_number }} --json headRefName -q .headRefName)
+            echo "ref=$HEAD_REF" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head_ref }}
+          ref: ${{ steps.resolve-ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Cache Claude Binary
+        id: cache-claude
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/claude
+          key: ${{ runner.os }}-claude-binary
+
+      - name: Install Claude Code
+        run: |
+          if [ ! -f "$HOME/.local/bin/claude" ]; then
+            curl -fsSL https://claude.ai/install.sh | bash
+          fi
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Agent Re-evaluate
         run: |
           echo "Agent addressing review comments..."
-          npx @anthropic-ai/claude-code --bare -p "Address the feedback in this PR review comment: '${{ inputs.comment_body }}'. The comment is on a PR that implements '${{ inputs.pull_request_title }}'. Use available tools to fix the code and tests." --allowedTools "Bash,Edit,Read"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          git add .
-          git commit -m "fix: Address agent review feedback"
-          git push origin ${{ inputs.head_ref }}
-          gh pr comment ${{ inputs.pull_request_number }} --body "🤖 **Agent Reviewer:** I have pushed a new commit to address your feedback."
+          claude --bare -p "Address the feedback in this PR review comment: '${{ inputs.comment_body }}'. The comment is on a PR that implements '${{ inputs.pull_request_title }}'. Use available tools to fix the code and tests." --allowedTools "Bash,Edit,Read"
+          
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "fix: Address agent review feedback"
+            git push origin ${{ steps.resolve-ref.outputs.ref }}
+            gh pr comment ${{ inputs.pull_request_number }} --body "🤖 **Agent Reviewer:** I have pushed a new commit to address your feedback."
+          else
+            echo "No changes to commit."
+            gh pr comment ${{ inputs.pull_request_number }} --body "🤖 **Agent Reviewer:** I analyzed your feedback but no code changes were needed."
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

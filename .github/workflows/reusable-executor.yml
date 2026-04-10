@@ -24,10 +24,20 @@ jobs:
       actions: write
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Cache Claude Binary
+        id: cache-claude
+        uses: actions/cache@v4
         with:
-          node-version: '20'
+          path: ~/.local/bin/claude
+          key: ${{ runner.os }}-claude-binary
+
+      - name: Install Claude Code
+        run: |
+          if [ ! -f "$HOME/.local/bin/claude" ]; then
+            curl -fsSL https://claude.ai/install.sh | bash
+          fi
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Agent Execution
         run: |
           echo "Executing plan for issue #${{ inputs.issue_number }}"
@@ -37,7 +47,7 @@ jobs:
           BRANCH_NAME="feature/issue-${{ inputs.issue_number }}"
           git checkout -b "$BRANCH_NAME" || git checkout "$BRANCH_NAME"
           
-          npx @anthropic-ai/claude-code --bare -p "Implement the approved plan for issue #${{ inputs.issue_number }}: '${{ inputs.issue_title }}'. Use available tools to write code and tests. Verify your changes." --allowedTools "Bash,Edit,Read"
+          claude --bare -p "Implement the approved plan for issue #${{ inputs.issue_number }}: '${{ inputs.issue_title }}'. Use available tools to write code and tests. Verify your changes." --allowedTools "Bash,Edit,Read"
           
           if [ -n "$(git status --porcelain)" ]; then
             git add .

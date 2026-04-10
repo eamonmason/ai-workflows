@@ -22,6 +22,20 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Claude Binary
+        id: cache-claude
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/claude
+          key: ${{ runner.os }}-claude-binary
+
+      - name: Install Claude Code
+        run: |
+          if [ ! -f "$HOME/.local/bin/claude" ]; then
+            curl -fsSL https://claude.ai/install.sh | bash
+          fi
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Agentic Planning
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -49,5 +63,5 @@ jobs:
           fi
           PROMPT="$PROMPT Mention that the user should reply with '@agent execute' to start, or provide further feedback to iterate on this plan."
           
-          PLAN=$(npx @anthropic-ai/claude-code --bare -p "$PROMPT" --allowedTools "Read")
+          PLAN=$(claude --bare -p "$PROMPT" --allowedTools "Read")
           gh issue comment ${{ inputs.issue_number }} --body "🤖 **Agent Planner:** $PLAN"
