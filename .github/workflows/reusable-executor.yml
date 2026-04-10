@@ -18,10 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     permissions:
-      issues: write
       contents: write
       pull-requests: write
       actions: write
+      issues: write
+      workflows: write
     steps:
       - uses: actions/checkout@v4
       - name: Cache Claude Binary
