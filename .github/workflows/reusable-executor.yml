@@ -23,10 +23,10 @@ jobs:
       actions: write
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Cache Claude Binary
         id: cache-claude
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local/bin/claude
           key: ${{ runner.os }}-claude-binary
