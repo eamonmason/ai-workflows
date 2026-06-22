@@ -62,7 +62,7 @@ jobs:
 
       - name: Checkout
         if: steps.resolve-ref.outputs.ref != ''
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.resolve-ref.outputs.ref }}
           fetch-depth: 0
