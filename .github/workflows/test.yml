@@ -1,0 +1,43 @@
+name: Test
+
+# This repo had no CI at all: the three reusable workflows were only ever
+# exercised by running them against a live caller. These tests extract the
+# shell out of the workflows and run it directly, so the security-relevant
+# logic -- the verify gate and the protected-path guard -- is checked on every
+# change to it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shell-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: pip install pyyaml
+      - run: shellcheck -S error tests/*.sh
+      - name: Verify loop
+        run: ./tests/test-verify-loop.sh
+      - name: Protected-path guard
+        run: ./tests/test-guard.sh
+
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: pip install pyyaml
+      - name: "No expression interpolation inside any run: block"
+        # ${{ }} inside a run: body is how untrusted input becomes shell code.
+        # Values must arrive via env: and be read as "$VAR".
+        run: ./tests/lint-workflows.py

