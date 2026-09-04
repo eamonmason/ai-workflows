@@ -37,7 +37,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install pyyaml
-      - name: No expression interpolation inside any run: block
+      - name: "No expression interpolation inside any run: block"
         # ${{ }} inside a run: body is how untrusted input becomes shell code.
         # Values must arrive via env: and be read as "$VAR".
         run: ./tests/lint-workflows.py
