@@ -4,7 +4,7 @@
 # The step body is extracted from the workflow at run time rather than copied
 # here, so this cannot silently drift from what the runner executes.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 STEP=$(mktemp)
 python3 tests/extract-step.py .github/workflows/reusable-executor.yml execute verify > "$STEP"
 

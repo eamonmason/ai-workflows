@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install pyyaml
-      - run: shellcheck tests/*.sh
+      - run: shellcheck -S error tests/*.sh
       - name: Verify loop
         run: ./tests/test-verify-loop.sh
       - name: Protected-path guard

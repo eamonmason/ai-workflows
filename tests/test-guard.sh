@@ -9,7 +9,7 @@
 # the guard diffs against the pre-agent commit precisely so that does not slip
 # past.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 STEP=$(mktemp)
 python3 tests/extract-step.py \
   .github/workflows/reusable-executor.yml execute "Guard protected paths" > "$STEP"
