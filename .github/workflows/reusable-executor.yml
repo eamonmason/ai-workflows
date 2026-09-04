@@ -122,21 +122,81 @@ jobs:
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Prepare branch
+      - name: Locate the approved spec
+        id: spec
         env:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
-          set -euo pipefail
+          # Deliberately no -e: a missing spec is reported, not crashed on.
+          set -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          BRANCH="feature/issue-${ISSUE_NUMBER}"
-          git checkout -B "$BRANCH"
-          # Recorded before the agent runs so the protected-path guard can see
-          # everything it did, including anything it committed itself.
+
+          # Match on the issue number, not the slug: editing an issue title
+          # changes the slug, and that must not orphan the work.
+          MATCHES=$(git branch -r --list "origin/agent/${ISSUE_NUMBER}-*" \
+                    | sed 's|.*origin/||' | tr -d ' ' | grep . || true)
+          COUNT=$(printf '%s\n' "$MATCHES" | grep -c . || true)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "reason=No spec branch \`agent/${ISSUE_NUMBER}-*\` exists. Open the issue and let the planner write a spec first, then approve it." >> "$GITHUB_OUTPUT"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$COUNT" -gt 1 ]; then
+            echo "reason=Ambiguous: $COUNT branches match \`agent/${ISSUE_NUMBER}-*\`. Delete the stale ones and retry." >> "$GITHUB_OUTPUT"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BRANCH="$MATCHES"
+          git checkout -q -B "$BRANCH" "origin/$BRANCH" || {
+            echo "reason=Could not check out \`$BRANCH\`." >> "$GITHUB_OUTPUT"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          SPECS=$(ls -1 "docs/specs/${ISSUE_NUMBER}-"*.md 2>/dev/null | grep . || true)
+          SCOUNT=$(printf '%s\n' "$SPECS" | grep -c . || true)
+          if [ "$SCOUNT" -ne 1 ]; then
+            echo "reason=Expected exactly one \`docs/specs/${ISSUE_NUMBER}-*.md\` on \`$BRANCH\`, found $SCOUNT." >> "$GITHUB_OUTPUT"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Spec branch: $BRANCH"
+          echo "Spec file:   $SPECS"
+          echo "found=true" >> "$GITHUB_OUTPUT"
           {
             echo "AGENT_BRANCH=$BRANCH"
+            echo "SPEC_PATH=$SPECS"
             echo "BASE_SHA=$(git rev-parse HEAD)"
           } >> "$GITHUB_ENV"
+
+      # Exits non-zero, which skips every later step: no agent runs, no PR.
+      - name: Fail closed when there is no single approved spec
+        if: steps.spec.outputs.found != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          REASON: ${{ steps.spec.outputs.reason }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "**Agent executor: blocked.** ${REASON}"
+          gh issue edit "$ISSUE_NUMBER" --add-label "agent:blocked" \
+            || echo "::warning::could not apply the agent:blocked label"
+          echo "::error::${REASON}"
+          exit 1
+
+      - name: Mark the issue as building
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          gh issue edit "$ISSUE_NUMBER" \
+            --add-label "agent:build" --remove-label "agent:spec" \
+            || echo "::warning::could not update labels"
 
       - name: Agent execution
         env:
@@ -147,8 +207,12 @@ jobs:
           # No GH_TOKEN here, deliberately. See the header.
         run: |
           set -euo pipefail
-          claude --bare -p "Implement the approved plan for issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}. Use available tools to write code and tests. Do not modify .github/ or the verification script." \
-            --allowedTools "Bash,Edit,Read"
+          PROMPT="Implement the approved spec for issue #${ISSUE_NUMBER}, titled: ${ISSUE_TITLE}."
+          PROMPT="$PROMPT The spec is the file ${SPEC_PATH} - read it first and treat it as the definition of done."
+          PROMPT="$PROMPT Implement every acceptance criterion in it, and add tests that demonstrate each one."
+          PROMPT="$PROMPT Implement nothing the spec does not call for; if you believe something extra is needed, note it in the spec's Scope section instead of building it."
+          PROMPT="$PROMPT Do not modify .github/ or the verification script."
+          claude --bare -p "$PROMPT" --allowedTools "Bash,Edit,Read"
 
       - name: Verify and repair
         id: verify
@@ -236,15 +300,16 @@ jobs:
           git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
             "HEAD:refs/heads/${AGENT_BRANCH}"
 
+          # The planner already opened this PR against the spec. The executor
+          # pushes onto the same branch, so one PR grows spec -> spec + code and
+          # a reviewer sees both halves in a single diff.
           PR_URL=$(gh pr view "$AGENT_BRANCH" --json url --jq .url 2>/dev/null || true)
           if [ -z "$PR_URL" ]; then
-            # Quoted heredoc: the issue title is untrusted text and must not be
-            # re-expanded by the shell on its way into the PR body.
             {
-              printf 'Implements #%s (%s).\n\n' "$ISSUE_NUMBER" "$ISSUE_TITLE"
-              printf 'Opened by the agent executor after `%s` passed.\n' "$VERIFY_CMD"
-              printf 'That gate is a pre-filter, not the merge gate: this repo'"'"'s\n'
-              printf 'required status checks remain authoritative.\n'
+              printf 'Implements #%s (%s), per `%s`.\n\n' \
+                "$ISSUE_NUMBER" "$ISSUE_TITLE" "$SPEC_PATH"
+              printf 'Pushed by the agent executor after `%s` passed. That gate is a\n' "$VERIFY_CMD"
+              printf 'pre-filter, not the merge gate: required status checks remain authoritative.\n'
             } > "$RUNNER_TEMP/pr-body.md"
             PR_URL=$(gh pr create \
               --title "feat: implement issue #${ISSUE_NUMBER}" \
@@ -252,10 +317,13 @@ jobs:
               --base "$BASE_BRANCH" \
               --head "$AGENT_BRANCH")
           fi
+          gh pr comment "$PR_URL" \
+            --body "**Agent executor:** \`${VERIFY_CMD}\` passed and the implementation is pushed. This PR now contains both the spec and the code implementing it."
           gh issue comment "$ISSUE_NUMBER" \
             --body "**Agent executor:** verification passed and the implementation is up at $PR_URL"
-          gh issue edit "$ISSUE_NUMBER" --add-label "agent:review" \
-            || echo "::warning::could not apply agent:review label"
+          gh issue edit "$ISSUE_NUMBER" \
+            --add-label "agent:review" --remove-label "agent:build" \
+            || echo "::warning::could not update labels"
 
       - name: Report no changes
         if: steps.verify.outputs.ok == 'true' && env.HAS_CHANGES != 'true'

@@ -28,6 +28,10 @@ jobs:
         run: ./tests/test-verify-loop.sh
       - name: Protected-path guard
         run: ./tests/test-guard.sh
+      - name: Planner guard - spec file only
+        run: ./tests/test-planner-guard.sh
+      - name: Spec location fails closed
+        run: ./tests/test-spec-location.sh
 
   workflow-lint:
     runs-on: ubuntu-latest
